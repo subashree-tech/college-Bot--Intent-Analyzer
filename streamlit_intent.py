@@ -1,12 +1,11 @@
 import streamlit as st
 from docx import Document
 from openai import OpenAI
-from pinecone import Pinecone, ServerlessSpec
-import tiktoken
-from tiktoken import get_encoding
+import pinecone
 import uuid
 import time
 import re
+import os
 
 # Initialize session state
 def init_session_state():
@@ -26,7 +25,7 @@ def init_session_state():
 # Call this function at the very beginning
 init_session_state()
 
-# Access your API key
+# Initialize API keys and constants
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 PINECONE_API_KEY = st.secrets["PINECONE_API_KEY"]
 INDEX_NAME = "college"
@@ -35,17 +34,16 @@ INDEX_NAME = "college"
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Initialize Pinecone
-pc = Pinecone(api_key=PINECONE_API_KEY)
+pinecone.init(api_key=PINECONE_API_KEY, environment="your-pinecone-environment")  # Replace with your actual environment
 
 # Create or connect to the Pinecone index
-if INDEX_NAME not in pc.list_indexes().names():
-    pc.create_index(
+if INDEX_NAME not in pinecone.list_indexes():
+    pinecone.create_index(
         name=INDEX_NAME,
         dimension=1536,
-        metric='cosine',
-        spec=ServerlessSpec(cloud='aws', region='us-east-1')
+        metric='cosine'
     )
-index = pc.Index(INDEX_NAME)
+index = pinecone.Index(INDEX_NAME)
 
 # Intent Instructions
 INTENT_INSTRUCTIONS = {
@@ -151,14 +149,12 @@ def extract_text_from_docx(file):
     return text
 
 def truncate_text(text, max_tokens):
-    tokenizer = get_encoding("cl100k_base")
-    tokens = tokenizer.encode(text)
-    return tokenizer.decode(tokens[:max_tokens])
+    words = text.split()
+    return ' '.join(words[:max_tokens])
 
-def num_tokens_from_string(string: str, encoding_name: str = "cl100k_base") -> int:
-    encoding = tiktoken.get_encoding(encoding_name)
-    num_tokens = len(encoding.encode(string))
-    return num_tokens
+def num_tokens_from_string(string: str) -> int:
+    # This is a very rough approximation
+    return len(string.split())
 
 def get_embedding(text):
     response = client.embeddings.create(
@@ -168,7 +164,7 @@ def get_embedding(text):
     return response.data[0].embedding
 
 def upsert_to_pinecone(text, file_name, file_id):
-    chunks = [text[i:i+8000] for i in range(0, len(text), 8000)]  # Split into 8000 character chunks
+    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]  # Split into 4000 character chunks
     for i, chunk in enumerate(chunks):
         embedding = get_embedding(chunk)
         metadata = {
@@ -203,7 +199,7 @@ def identify_intent(query):
     7. New Student Orientation and Initial Advising
     8. Course, Major, and Degree Program Information
     9. Student Life and Wellness
-    10.Food, Dining, and Nutrition
+    10. Food, Dining, and Nutrition
 
     Respond with ONLY the number (1-10) of the most relevant intent.
 
@@ -212,7 +208,7 @@ def identify_intent(query):
     intent_response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "You are an intent identification assistant specializing in queries about  Texas Tech University."},
+            {"role": "system", "content": "You are an intent identification assistant specializing in queries about Texas Tech University."},
             {"role": "user", "content": intent_prompt}
         ]
     )
@@ -222,7 +218,7 @@ def identify_intent(query):
     intent_number = re.search(r'\d+', response_text)
     if intent_number:
         return int(intent_number.group())
-    
+    return 5  # Default to general queries if no intent is identified
 
 def get_intent_instruction(intent):
     return INTENT_INSTRUCTIONS.get(intent, INTENT_INSTRUCTIONS[5])
@@ -240,7 +236,6 @@ def generate_clarification_query(intent):
         9: [ "Financial management", "Campus activities", "Study strategies", "Dorm life essentials"],
         10:  [ "Healthy eating tips", "On-campus dining options","Meal planning and budgeting",  "Smart Choice dining locations","Dorm cooking ideas" ]
     }
-    
     options = intent_options.get(intent, ["General information", "Specific examples", "Common issues", "Best practices"])
     
     clarification_prompt = f"""
@@ -259,7 +254,6 @@ def generate_clarification_query(intent):
 
 def process_clarification(original_query, clarification):
     combined_query = f"{original_query} {clarification}"
-    clarification_embedding = get_embedding(combined_query)
     clarification_context = query_pinecone(combined_query, top_k=3)
     return clarification_context
 
@@ -310,8 +304,6 @@ def display_chat_history():
 
 def handle_error(error):
     st.error(f"An error occurred: {str(error)}")
-    
-
 
 # Streamlit Interface
 st.set_page_config(page_title="College Buddy Assistant", layout="wide")
@@ -335,7 +327,7 @@ with st.sidebar:
             st.text(f"File ID: {file_id}")
         st.text(f"Total token count: {total_token_count}")
 
-# Modify the main content area
+# Main content area
 st.header("Ask Your Question")
 user_query = st.text_input("What would you like to know about academic advising or declaring your major?")
 
@@ -375,8 +367,12 @@ if st.session_state.need_clarification:
                     st.write(final_answer)
                     save_chat_history(f"{st.session_state.original_query} (Clarification: {clarification_input})", final_answer)
                     st.session_state.need_clarification = False
-                # Removed collect_feedback() call
             except Exception as e:
                 handle_error(e)
         else:
             st.warning("Please provide a clarification before submitting.")
+
+# Display chat history
+display_chat_history()
+
+
